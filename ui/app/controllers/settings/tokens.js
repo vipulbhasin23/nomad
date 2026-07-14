@@ -50,7 +50,8 @@ export default class Tokens extends Controller {
     // Clear out all data to ensure only data the anonymous token is privileged to see is shown
     this.resetStore();
     this.token.reset();
-    this.store.findAll('auth-method');
+    // Refresh so the model is updated with available authMethods.
+    this.router.refresh();
   }
 
   /**
