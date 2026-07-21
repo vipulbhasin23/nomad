@@ -271,8 +271,20 @@ func (e *EvalEligibility) SetJob(job *structs.Job) {
 		for _, task := range tg.Tasks {
 			constraints = append(constraints, task.Constraints...)
 		}
+		if len(structs.EscapedConstraints(constraints)) > 0 {
+			e.tgEscapedConstraints[tg.Name] = true
+			continue
+		}
 
-		e.tgEscapedConstraints[tg.Name] = len(structs.EscapedConstraints(constraints)) != 0
+		// CSI volume requests always escape node class because the volume may
+		// not *currently* be on the node
+		csiVolsCount := 0
+		for _, vol := range tg.Volumes {
+			if vol.Type == structs.VolumeTypeCSI {
+				csiVolsCount++
+			}
+		}
+		e.tgEscapedConstraints[tg.Name] = csiVolsCount != 0
 	}
 }
 

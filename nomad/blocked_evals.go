@@ -105,6 +105,7 @@ type capacityUpdate struct {
 	computedClass string
 	quotaChange   string
 	nodeID        string
+	namespace     string
 
 	blockedEval  *structs.Evaluation
 	blockToken   string
@@ -264,7 +265,7 @@ func (b *BlockedEvals) processBlock(eval *structs.Evaluation, token string) {
 		token: token,
 	}
 
-	// If the eval has escaped, meaning computed node classes could not capture
+	// if the eval has escaped, meaning computed node classes could not capture
 	// the constraints of the job, we store the eval separately as we have to
 	// unblock it whenever node capacity changes. This is because we don't know
 	// what node class is feasible for the jobs constraints.
@@ -600,6 +601,40 @@ func (b *BlockedEvals) UnblockNode(nodeID string) chan struct{} {
 	return fut
 }
 
+// UnblockNamespace causes evaluation to be enqueued in the eval broker if they
+// escape a node class but could potentially make progress on capacity changes
+// to non-node resources specific to the namespace (ex. CSI volumes added).
+func (b *BlockedEvals) UnblockNamespace(namespace string, index uint64) chan struct{} {
+	fut := make(chan struct{})
+
+	b.flushLock.RLock()
+	defer b.flushLock.RUnlock()
+	if !b.enabled {
+		close(fut)
+		return fut
+	}
+	// Capture chan in flushlock as Flush overwrites it
+	ch := b.capacityChangeCh
+	done := b.stopCh
+
+	// Store the index in which the unblock happened. We use this on subsequent
+	// block calls in case the evaluation was in the scheduler when a trigger
+	// occurred. The missedUnblock method will never match evals to
+	// ns/<namespace> but this will still contribute to bumping the max index
+	// seen to compare against the eval's snapshot index
+	b.unblockIndexesLock.Lock()
+	now := time.Now().UTC()
+	b.unblockIndexes["ns/"+namespace] = unblockEvent{index, now}
+	b.unblockIndexesLock.Unlock()
+
+	select {
+	case <-done:
+	case ch <- &capacityUpdate{namespace: namespace, future: fut}:
+	}
+
+	return fut
+}
+
 // watchCapacity is a long lived function that watches for capacity changes in
 // nodes and unblocks the correct set of evals.
 func (b *BlockedEvals) watchCapacity(
@@ -622,13 +657,13 @@ func (b *BlockedEvals) watchCapacity(
 				continue
 			}
 
-			b.unblock(update.computedClass, update.quotaChange, update.nodeID)
+			b.unblock(update.computedClass, update.quotaChange, update.nodeID, update.namespace)
 			close(update.future)
 		}
 	}
 }
 
-func (b *BlockedEvals) unblock(computedClass, quota, nodeID string) {
+func (b *BlockedEvals) unblock(computedClass, quota, nodeID, ns string) {
 
 	// Protect against the case of a flush.
 	b.flushLock.RLock()
@@ -645,8 +680,12 @@ func (b *BlockedEvals) unblock(computedClass, quota, nodeID string) {
 	numEscaped := len(b.escaped)
 	unblocked := make(map[*structs.Evaluation]string, max(uint64(numEscaped), 4))
 
-	if numEscaped != 0 && computedClass != "" {
+	if numEscaped != 0 && (computedClass != "" || ns != "") {
 		for id, wrapped := range b.escaped {
+			if ns != "" && wrapped.eval.Namespace != ns {
+				continue // this is an unblock for a specific namespace
+			}
+
 			unblocked[wrapped.eval] = wrapped.token
 			delete(b.escaped, id)
 			delete(b.jobs, structs.NewNamespacedID(wrapped.eval.JobID, wrapped.eval.Namespace))

@@ -1424,6 +1424,14 @@ func (n *nomadFSM) applyCSIVolumeRegister(buf []byte, index uint64) interface{} 
 		return err
 	}
 
+	// unblock evals in these volumes namespaces
+	volNSs := map[string]struct{}{req.RequestNamespace(): {}}
+	for _, vol := range req.Volumes {
+		volNSs[vol.Namespace] = struct{}{}
+	}
+	for volNS := range volNSs {
+		n.blockedEvals.UnblockNamespace(volNS, index)
+	}
 	return nil
 }
 
